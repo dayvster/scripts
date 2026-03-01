@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Tokyo Night Colors
+BOLD="\e[1m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+DIM="\e[2m"
+RESET="\e[0m"
+
+# Indentation Helpers
+# h_indent: Header indentation (2 spaces)
+# b_indent: Body/List indentation (4 spaces)
+h_indent() { sed 's/^/  /'; }
+b_indent() { sed 's/^/    /'; }
+
+echo -e "\n${BOLD}${BLUE}󰚰 System Update Check${RESET}" | h_indent
+
+echo
+
+# -------------------------
+# Pacman updates
+# -------------------------
+echo -e "${BOLD}󰮯 Pacman${RESET}" | h_indent
+if command -v checkupdates &>/dev/null; then
+  PACMAN_UPDATES=$(checkupdates || true)
+  if [[ -n "$PACMAN_UPDATES" ]]; then
+    echo "$PACMAN_UPDATES" | column -t | b_indent
+    echo -e "${YELLOW}󱓞 $(echo "$PACMAN_UPDATES" | wc -l) packages available${RESET}" | b_indent
+  else
+    echo -e "${GREEN} System is up to date${RESET}" | b_indent
+  fi
+else
+  echo -e "${DIM}checkupdates not found${RESET}" | b_indent
+fi
+
+echo
+
+# -------------------------
+# AUR updates (yay)
+# -------------------------
+echo -e "${BOLD}󰣇 AUR (yay)${RESET}" | h_indent
+if command -v yay &>/dev/null; then
+  AUR_UPDATES=$(yay -Qua || true)
+  if [[ -n "$AUR_UPDATES" ]]; then
+    echo "$AUR_UPDATES" | column -t | b_indent
+    echo -e "${YELLOW}󱓞 $(echo "$AUR_UPDATES" | wc -l) packages available${RESET}" | b_indent
+  else
+    echo -e "${GREEN} AUR is up to date${RESET}" | b_indent
+  fi
+else
+  echo -e "${DIM}yay not installed${RESET}" | b_indent
+fi
+
+echo
+
+# -------------------------
+# Flatpak updates
+# -------------------------
+echo -e "${BOLD} Flatpak${RESET}" | h_indent
+if command -v flatpak &>/dev/null; then
+  FLATPAK_UPDATES=$(flatpak remote-ls --updates 2>/dev/null || true)
+  if [[ -n "$FLATPAK_UPDATES" ]]; then
+    echo "$FLATPAK_UPDATES" | column -t | b_indent
+    echo -e "${YELLOW}󱓞 $(echo "$FLATPAK_UPDATES" | wc -l) updates available${RESET}" | b_indent
+  else
+    echo -e "${GREEN} Flatpaks are up to date${RESET}" | b_indent
+  fi
+else
+  echo -e "${DIM}flatpak not installed${RESET}" | b_indent
+fi
+
+echo -e "\n${BOLD}${BLUE}󰄬 Done${RESET}" | h_indent
+echo

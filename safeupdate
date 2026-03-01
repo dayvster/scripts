@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# safeupdate: Safely update Arch Linux with Btrfs snapshots (Snapper-aware)
+
+# Check for root
+if [ "$EUID" -ne 0 ]; then
+  echo "Run this script as root!"
+  exit 1
+fi
+
+# Paths and timestamp
+ROOT_SUBVOL="/"
+SNAP_DIR="/.snapshots"
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+echo "==============================================="
+echo "SAFEUPDATE: Arch Linux update starting..."
+echo "Timestamp: $TIMESTAMP"
+echo "==============================================="
+
+# Check if Snapper is installed
+if command -v snapper >/dev/null 2>&1; then
+  echo "Snapper detected, creating read-only snapshot..."
+  snapper -c root create --description "UPDATE: $TIMESTAMP" --userdata important=no
+  if [ $? -ne 0 ]; then
+    echo "ERROR: Snapper snapshot failed!"
+    exit 1
+  fi
+  echo "Snapper snapshot created successfully."
+else
+  echo "Snapper not found, falling back to raw Btrfs snapshot..."
+  mkdir -p "$SNAP_DIR"
+  SNAP_PATH="$SNAP_DIR/root_$(date +%Y-%m-%d_%H-%M-%S)"
+  btrfs subvolume snapshot -r "$ROOT_SUBVOL" "$SNAP_PATH"
+  if [ $? -ne 0 ]; then
+    echo "ERROR: Btrfs snapshot failed!"
+    exit 1
+  fi
+  echo "Btrfs snapshot created successfully at $SNAP_PATH"
+fi
+
+echo
+echo "==============================================="
+echo "Updating system packages with pacman..."
+pacman -Syu --noconfirm
+
+echo
+# Update AUR packages if yay is installed
+if command -v yay >/dev/null 2>&1; then
+  echo "Updating AUR packages with yay..."
+  sudo -u "${SUDO_USER:-$USER}" yay -Syu --noconfirm
+else
+  echo "yay not found, skipping AUR updates."
+fi
+
+echo
+echo "==============================================="
+echo "Update completed successfully."
+
+# Rollback instructions
+if command -v snapper >/dev/null 2>&1; then
+  echo "If something broke, rollback with Snapper:"
+  echo "  snapper -c root rollback <snapshot-number>"
+else
+  echo "If something broke, rollback with Btrfs:"
+  echo "  sudo btrfs subvolume delete /"
+  echo "  sudo btrfs subvolume snapshot -r $SNAP_PATH /"
+fi
+
+echo "==============================================="
