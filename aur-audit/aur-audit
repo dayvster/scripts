@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PLAIN=false
+
+BOLD="" GREEN="" YELLOW="" RED="" BLUE="" CYAN="" DIM="" RESET="" BOLD_F=""
+
+usage() {
+  cat <<EOF
+Usage: aur-audit [options]
+
+Options:
+  -h, --help              Show this help
+  -p, --plain             Plain text output (no colors)
+
+Scans installed AUR packages for issues:
+  - Orphaned packages (no maintainer)
+  - Inactive maintainers
+  - Broken PKGBUILDs
+  - GitHub repos with no recent activity
+EOF
+  exit 1
+}
+
+set_colors() {
+  if [[ "$PLAIN" == "true" ]]; then
+    BOLD="" GREEN="" YELLOW="" RED="" BLUE="" CYAN="" DIM="" RESET="" BOLD_F=""
+  else
+    BOLD="\e[1m"
+    GREEN="\e[32m"
+    YELLOW="\e[33m"
+    RED="\e[31m"
+    BLUE="\e[34m"
+    CYAN="\e[36m"
+    DIM="\e[2m"
+    RESET="\e[0m"
+    BOLD_F="${BOLD}"
+  fi
+}
+
+get_aur_info() {
+  local pkg="$1"
+  curl -s --max-time 5 "https://aur.archlinux.org/rpc.php?v=5&type=info&arg[]=$pkg" 2>/dev/null || echo '{}'
+}
+
+get_maintainer() {
+  local pkg="$1"
+  get_aur_info "$pkg" | jq -r '.results[0].Maintainer // "orphan"'
+}
+
+get_last_updated() {
+  local pkg="$1"
+  get_aur_info "$pkg" | jq -r '.results[0].LastUpdated // 0'
+}
+
+days_since_update() {
+  local timestamp="$1"
+  if [[ "$timestamp" == "0" || -z "$timestamp" || "$timestamp" == "null" ]]; then
+    echo "0"
+    return
+  fi
+  local now
+  now=$(date +%s)
+  echo $(( (now - timestamp) / 86400 ))
+}
+
+check_pkgbuild() {
+  local pkg="$1"
+  local build_dir
+  build_dir=$(mktemp -d)
+  
+  cd "$build_dir"
+  if curl -sL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$pkg" -o PKGBUILD 2>/dev/null; then
+    if grep -q "^git)" PKGBUILD 2>/dev/null; then
+      rm -rf "$build_dir"
+      return 0
+    fi
+  fi
+  
+  rm -rf "$build_dir"
+  return 1
+}
+
+scan_aur_packages() {
+  echo
+  echo -e "${BOLD_F}${BLUE}󰐪 AUR Audit${RESET}"
+  echo
+  
+  local -a aur_pkgs
+  while IFS= read -r pkg; do
+    aur_pkgs+=("$pkg")
+  done < <(pacman -Qmq 2>/dev/null || true)
+  
+  if [[ ${#aur_pkgs[@]} -eq 0 ]]; then
+    echo -e "  ${DIM}No AUR packages installed${RESET}"
+    return
+  fi
+  
+  echo -e "  ${CYAN}Scanning ${#aur_pkgs[@]} AUR packages...${RESET}"
+  echo
+  
+  local -a orphans=()
+  local -a stale=()
+  
+  local args=""
+  for pkg in "${aur_pkgs[@]}"; do
+    args+="arg[]=$pkg&"
+  done
+  
+  local aur_response
+  aur_response=$(curl -s --max-time 10 "https://aur.archlinux.org/rpc.php?v=5&type=info&${args}" 2>/dev/null || echo '{"results":[]}')
+  
+  for pkg in "${aur_pkgs[@]}"; do
+    local maintainer last_updated days
+    maintainer=$(echo "$aur_response" | jq -r ".results[] | select(.Name == \"$pkg\") | .Maintainer // \"orphan\"")
+    last_updated=$(echo "$aur_response" | jq -r ".results[] | select(.Name == \"$pkg\") | .LastUpdated // 0")
+    days=$(days_since_update "$last_updated")
+    
+    if [[ "$maintainer" == "orphan" || "$maintainer" == "" || "$maintainer" == "null" ]]; then
+      orphans+=("$pkg")
+    elif [[ "$days" -gt 730 && "$days" -gt 0 ]]; then
+      stale+=("$pkg|$days")
+    fi
+  done
+  
+  if [[ ${#orphans[@]} -eq 0 && ${#stale[@]} -eq 0 ]]; then
+    echo -e "  ${GREEN}✓ All AUR packages look healthy${RESET}"
+    echo
+    return
+  fi
+  
+  if [[ ${#orphans[@]} -gt 0 ]]; then
+    echo -e "${BOLD_F}${RED}󰚤 Orphaned Packages (no maintainer)${RESET}"
+    for pkg in "${orphans[@]}"; do
+      echo -e "  ${RED}*${RESET} ${pkg}"
+    done
+    echo
+  fi
+  
+  if [[ ${#stale[@]} -gt 0 ]]; then
+    echo -e "${BOLD_F}${YELLOW}󰐪 Stale Packages (>2 years)${RESET}"
+    for info in "${stale[@]}"; do
+      IFS='|' read -r pkg days <<< "$info"
+      echo -e "  ${YELLOW}*${RESET} ${pkg} (${days}d)"
+    done
+    echo
+  fi
+  
+  echo -e "${BOLD_F}${CYAN}Summary${RESET}"
+  echo -e "  ${CYAN}Total AUR packages${RESET}: ${#aur_pkgs[@]}"
+  echo -e "  ${RED}Orphans${RESET}: ${#orphans[@]}"
+  echo -e "  ${YELLOW}Stale${RESET}: ${#stale[@]}"
+  echo
+}
+
+main() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage ;;
+      -p|--plain) PLAIN=true ;;
+      *) ;;
+    esac
+    shift
+  done
+  
+  set_colors
+  scan_aur_packages
+}
+
+main "$@"

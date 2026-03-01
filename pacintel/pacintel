@@ -1,0 +1,469 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PLAIN=false
+
+BOLD=""
+GREEN=""
+YELLOW=""
+RED=""
+BLUE=""
+CYAN=""
+DIM=""
+RESET=""
+BOLD_F=""
+
+usage() {
+  cat <<EOF
+Usage: pacintel <package> [options]
+
+Options:
+  -h, --help              Show this help
+  -p, --plain             Plain text output (no colors)
+  -a, --abandoned <days> Show packages not updated in X days (default: 730)
+  -o, --orphans          Show orphan packages and their dependencies
+  -e, --explicit         List all explicitly installed packages
+  -d, --deps             List packages that are dependencies only
+  -l, --list             List all installed packages with info
+  -D, --depends          Show dependencies for a package
+
+Examples:
+  pacintel firefox              # Info on specific package
+  pacintel firefox -D           # Show firefox dependencies
+  pacintel -a 365               # Show packages abandoned > 1 year
+  pacintel -o                   # Show orphan packages
+  pacintel -e                   # List explicit packages
+  pacintel -l                   # List all with dates
+EOF
+  exit 1
+}
+
+get_install_date() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Install Date" | sed 's/.*: //'
+}
+
+get_install_reason() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Install Reason" | sed 's/.*: //'
+}
+
+set_colors() {
+  if [[ "$PLAIN" == "true" ]]; then
+    BOLD="" GREEN="" YELLOW="" RED="" BLUE="" CYAN="" DIM="" RESET="" BOLD_F=""
+  else
+    BOLD="\e[1m"
+    GREEN="\e[32m"
+    YELLOW="\e[33m"
+    RED="\e[31m"
+    BLUE="\e[34m"
+    CYAN="\e[36m"
+    DIM="\e[2m"
+    RESET="\e[0m"
+    BOLD_F="${BOLD}"
+  fi
+}
+
+get_version() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Version" | sed 's/.*: //' || echo ""
+}
+
+get_build_date() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Build Date" | sed 's/.*: //' || echo ""
+}
+
+get_install_date() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Install Date" | sed 's/.*: //' || echo ""
+}
+
+get_install_reason() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Install Reason" | sed 's/.*: //' || echo ""
+}
+
+get_arch() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Architecture" | sed 's/.*: //' || echo ""
+}
+
+get_repo() {
+  local pkg="$1"
+  local repo
+  repo=$(pacman -Qi "$pkg" 2>/dev/null | grep "^Repository" | sed 's/.*: //')
+  if [[ -z "$repo" ]]; then
+    repo=$(pacman -Si "$pkg" 2>/dev/null | grep "^Repository" | sed 's/.*: //')
+  fi
+  echo "${repo:-AUR}"
+}
+
+get_size() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Installed Size" | sed 's/.*: //' || echo ""
+}
+
+get_desc() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Description" | sed 's/.*: //' || echo ""
+}
+
+get_required_by_count() {
+  local pkg="$1"
+  pacman -Qii "$pkg" 2>/dev/null | grep "^Required By" | tail -n +2 | wc -l
+}
+
+get_depends() {
+  local pkg="$1"
+  pacman -Qi "$pkg" 2>/dev/null | grep "^Depends On" | sed 's/.*: //'
+}
+
+days_since() {
+  local date_str="$1"
+  if [[ -z "$date_str" || "$date_str" == "Unknown" ]]; then
+    echo "-1"
+    return
+  fi
+  local epoch_date
+  epoch_date=$(date -d "$date_str" +%s 2>/dev/null) || { echo "-1"; return; }
+  local now
+  now=$(date +%s)
+  echo $(( (now - epoch_date) / 86400 ))
+}
+
+show_package_info() {
+  local pkg="$1"
+  
+  if ! pacman -Qq "$pkg" &>/dev/null; then
+    echo -e "${RED}Package '$pkg' not found${RESET}"
+    return 1
+  fi
+  
+  local version install_date install_reason build_date arch repo size desc
+  version=$(get_version "$pkg")
+  install_date=$(get_install_date "$pkg")
+  install_reason=$(get_install_reason "$pkg")
+  build_date=$(get_build_date "$pkg")
+  arch=$(get_arch "$pkg")
+  repo=$(get_repo "$pkg")
+  size=$(get_size "$pkg")
+  desc=$(get_desc "$pkg")
+  
+  local days
+  days=$(days_since "$build_date")
+  
+  local deps_count
+  deps_count=$(pacman -Qi "$pkg" 2>/dev/null | awk '/^Depends On/{print NF-2}')
+  [[ "$deps_count" == "0" || -z "$deps_count" ]] && deps_count="0"
+  
+  local required_by
+  required_by=$(get_required_by_count "$pkg")
+  [[ "$required_by" == "0" ]] && required_by="-"
+  
+  local status_icon status_color
+  if [[ "$days" -gt 730 ]]; then
+    status_icon="Abandoned"
+    status_color="${YELLOW}"
+  elif [[ "$days" -lt 0 ]]; then
+    status_icon="Unknown"
+    status_color="${DIM}"
+  else
+    status_icon="Active"
+    status_color="${GREEN}"
+  fi
+  
+  echo -e "${BOLD_F}${BLUE}󰮯 $pkg${RESET}"
+  echo -e "  ${desc:-No description}"
+  echo
+  echo -e "  ${CYAN}Version${RESET}    : ${version}"
+  echo -e "  ${CYAN}Repo${RESET}       : ${repo}"
+  echo -e "  ${CYAN}Arch${RESET}       : ${arch}"
+  echo -e "  ${CYAN}Size${RESET}       : ${size}"
+  echo -e "  ${CYAN}Installed${RESET}  : ${install_date}"
+  echo -e "  ${CYAN}Last Build${RESET} : ${build_date} (${days}d ago)"
+  echo -e "  ${CYAN}Deps${RESET}       : ${deps_count}  ${CYAN}RDep${RESET} : ${required_by}"
+  echo
+  if [[ "$install_reason" == "Explicitly installed" ]]; then
+    echo -e "  ${CYAN}Type${RESET}       : ${GREEN}Explicit${RESET}"
+  else
+    echo -e "  ${CYAN}Type${RESET}       : ${DIM}Dependency${RESET}"
+  fi
+  echo -e "  ${CYAN}Status${RESET}     : ${status_color}${status_icon}${RESET}"
+  echo
+}
+
+show_depends() {
+  local pkg="$1"
+  
+  if ! pacman -Qq "$pkg" &>/dev/null; then
+    echo -e "${RED}Package '$pkg' not found${RESET}"
+    return 1
+  fi
+  
+  echo
+  echo -e "${BOLD_F}${CYAN}󰌆 $pkg depends on${RESET}"
+  echo
+  
+  declare -A dep_status
+  
+  local deps_raw
+  deps_raw=$(pacman -Qi "$pkg" 2>/dev/null | awk '/^Depends On/{$1=$2=""; print $0}' | sed 's/^ *//')
+  
+  for dep in $deps_raw; do
+    local dep_name="${dep%%[<>=]*}"
+    [[ -z "$dep_name" || "$dep_name" == ":" ]] && continue
+    
+    if [[ -z "${dep_status[$dep_name]+_}" ]]; then
+      if pacman -Qq "$dep_name" &>/dev/null; then
+        local reason
+        reason=$(get_install_reason "$dep_name")
+        if [[ "$reason" == "Explicitly installed" ]]; then
+          dep_status[$dep_name]="explicit"
+        else
+          dep_status[$dep_name]="dep"
+        fi
+      else
+        dep_status[$dep_name]="missing"
+      fi
+    fi
+  done
+  
+  if [[ ${#dep_status[@]} -eq 0 ]]; then
+    echo -e "  ${DIM}No dependencies${RESET}"
+    return
+  fi
+  
+  for dep in "${!dep_status[@]}"; do
+    local status="${dep_status[$dep]}"
+    case "$status" in
+      explicit) echo -e "  ${GREEN}*${RESET} ${dep} ${GREEN}(explicit)${RESET}" ;;
+      dep) echo -e "  ${CYAN}*${RESET} ${dep} ${DIM}(dep)${RESET}" ;;
+      missing) echo -e "  ${RED}*${RESET} ${dep} ${YELLOW}(missing)${RESET}" ;;
+    esac
+  done | sort
+  
+  local required_by
+  required_by=$(pacman -Qii "$pkg" 2>/dev/null | grep "^Required By" | sed 's/.*: //')
+  
+  if [[ -n "$required_by" && "$required_by" != "None" ]]; then
+    echo
+    echo -e "${BOLD_F}${YELLOW}󰜺 Required by${RESET}"
+    echo
+    
+    while read -r req; do
+      req="${req%%[<>=]*}"
+      req="${req// /}"
+      [[ -z "$req" ]] && continue
+      
+      if pacman -Qq "$req" &>/dev/null; then
+        local reason
+        reason=$(get_install_reason "$req")
+        if [[ "$reason" == "Explicitly installed" ]]; then
+          echo -e "  ${GREEN}*${RESET} ${req} ${GREEN}(explicit)${RESET}"
+        else
+          echo -e "  ${CYAN}*${RESET} ${req} ${DIM}(dep)${RESET}"
+        fi
+      fi
+    done <<< "$required_by"
+  fi
+  echo
+}
+
+show_abandoned() {
+  local threshold="${1:-730}"
+  echo
+  echo -e "${BOLD_F}${YELLOW}󰴾 Abandoned (>${threshold} days)${RESET}"
+  echo
+  
+  local found=0
+  local -a abandoned_pkgs
+  while read -r pkg; do
+    local build_date days
+    build_date=$(get_build_date "$pkg")
+    days=$(days_since "$build_date")
+    
+    if [[ "$days" -gt "$threshold" ]]; then
+      abandoned_pkgs+=("$pkg|$build_date|$days")
+      ((found++))
+    fi
+  done < <(pacman -Qq)
+  
+  if [[ "$found" -eq 0 ]]; then
+    echo -e "  ${GREEN}No abandoned packages${RESET}"
+  else
+    for pkg_info in "${abandoned_pkgs[@]}"; do
+      IFS='|' read -r pkg build_date days <<< "$pkg_info"
+      echo -e "  ${RED}*${RESET} ${pkg}"
+      echo -e "    ${DIM}Last build: ${build_date}${RESET}"
+      echo -e "    ${YELLOW}Age: ${days} days${RESET}"
+      echo
+    done
+    echo -e "${YELLOW}Total: ${found} abandoned${RESET}"
+  fi
+  echo
+}
+
+show_orphans() {
+  echo
+  echo -e "${BOLD_F}${RED}󰚤 Orphans (unrequired)${RESET}"
+  echo
+  
+  local orphans
+  orphans=$(pacman -Qdtq 2>/dev/null || true)
+  
+  if [[ -z "$orphans" ]]; then
+    echo -e "  ${GREEN}No orphans${RESET}"
+    return
+  fi
+  
+  local orphan_count=0
+  while read -r orphan; do
+    local install_date
+    install_date=$(get_install_date "$orphan")
+    echo -e "  ${RED}*${RESET} ${orphan}"
+    echo -e "    ${DIM}Installed: ${install_date}${RESET}"
+    
+    local was_dep_of
+    was_dep_of=$(pacman -Qii "$orphan" 2>/dev/null | grep "^Required By" | tail -n +2 | awk '{print $2}' || true)
+    
+    if [[ -n "$was_dep_of" ]]; then
+      while read -r pkg; do
+        if [[ -n "$pkg" ]]; then
+          local reason
+          reason=$(get_install_reason "$pkg")
+          if [[ "$reason" == "Explicitly installed" ]]; then
+            echo -e "    ${GREEN}->${RESET} ${pkg} ${DIM}(explicit)${RESET}"
+          else
+            echo -e "    ${CYAN}->${RESET} ${pkg} ${DIM}(dep)${RESET}"
+          fi
+        fi
+      done <<< "$was_dep_of"
+    else
+      echo -e "    ${DIM}-> (no dependents)${RESET}"
+    fi
+    echo
+    ((orphan_count++))
+  done <<< "$orphans"
+  
+  echo -e "${RED}Total: ${orphan_count} orphans${RESET}"
+  echo
+}
+
+show_explicit() {
+  echo
+  echo -e "${BOLD_F}${GREEN}󰀔 Explicit Installs${RESET}"
+  echo
+  
+  local count=0
+  while read -r pkg; do
+    local install_date
+    install_date=$(get_install_date "$pkg")
+    echo -e "  ${GREEN}*${RESET} ${pkg}"
+    echo -e "    ${DIM}${install_date}${RESET}"
+    ((count++))
+  done < <(pacman -Qqet)
+  
+  echo
+  echo -e "${GREEN}Total: ${count} explicit${RESET}"
+}
+
+show_deps_only() {
+  echo
+  echo -e "${BOLD_F}${DIM}󰌆 Dependencies Only${RESET}"
+  echo
+  
+  local count=0
+  while read -r pkg; do
+    local install_date
+    install_date=$(get_install_date "$pkg")
+    echo -e "  ${DIM}*${RESET} ${pkg}"
+    echo -e "    ${DIM}${install_date}${RESET}"
+    ((count++))
+  done < <(pacman -Qqdt)
+  
+  echo
+  echo -e "${DIM}Total: ${count} dependencies${RESET}"
+}
+
+show_list() {
+  echo
+  echo -e "${BOLD_F}${BLUE}󰮯 All Installed Packages${RESET}"
+  echo
+  printf "  ${CYAN}%-30s %-25s %-10s${RESET}\n" "PACKAGE" "INSTALLED" "TYPE"
+  echo "${DIM}  ---------------------------------------------------------------${RESET}"
+  
+  while read -r pkg; do
+    local install_date reason
+    install_date=$(get_install_date "$pkg")
+    reason=$(get_install_reason "$pkg")
+    
+    local type_emoji type_color
+    if [[ "$reason" == "Explicitly installed" ]]; then
+      type_emoji="EXPLICIT"
+      type_color="${GREEN}"
+    else
+      type_emoji="DEP"
+      type_color="${DIM}"
+    fi
+    
+    printf "  %-30s %-25s ${type_color}%-10s${RESET}\n" \
+      "$pkg" "${install_date:0:24}" "$type_emoji"
+  done < <(pacman -Qq)
+}
+
+main() {
+  local mode="info"
+  local target=""
+  local abandoned_days=730
+  
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage ;;
+      -p|--plain) PLAIN=true ;;
+      -a|--abandoned)
+        mode="abandoned"
+        shift
+        [[ $# -gt 0 ]] && abandoned_days="$1"
+        ;;
+      -o|--orphans) mode="orphans" ;;
+      -e|--explicit) mode="explicit" ;;
+      -d|--deps) mode="deps" ;;
+      -l|--list) mode="list" ;;
+      -D|--depends) mode="depends" ;;
+      -*)
+        echo -e "${RED}Unknown option: $1${RESET}"
+        usage
+        ;;
+      *) target="$1" ;;
+    esac
+    shift
+  done
+  
+  set_colors
+  
+  case "$mode" in
+    info)
+      if [[ -z "$target" ]]; then
+        echo -e "${RED}Please specify a package name${RESET}"
+        usage
+      fi
+      show_package_info "$target"
+      ;;
+    depends)
+      if [[ -z "$target" ]]; then
+        echo -e "${RED}Please specify a package name${RESET}"
+        usage
+      fi
+      show_depends "$target"
+      ;;
+    abandoned) show_abandoned "$abandoned_days" ;;
+    orphans) show_orphans ;;
+    explicit) show_explicit ;;
+    deps) show_deps_only ;;
+    list) show_list ;;
+  esac
+}
+
+main "$@"
