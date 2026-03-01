@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+
+set +euo pipefail
+
+PLAIN=false
+RECURSIVE=false
+
+BOLD="" GREEN="" YELLOW="" RED="" BLUE="" CYAN="" DIM="" RESET="" BOLD_F=""
+
+usage() {
+  cat <<EOF
+Usage: dev-drift [directory] [options]
+
+Detect version drift across development environments.
+
+Options:
+  -h, --help              Show this help
+  -p, --plain             Plain text output (no colors)
+  -r, --recursive         Recursively scan subdirectories
+
+Scans for:
+  - Node.js (package.json engines, .nvmrc, .node-version)
+  - Rust (rust-toolchain.toml, Cargo.toml)
+  - Zig (build.zig.zon, .zig-version)
+  - Go (go.mod version)
+  - Python (pyproject.toml, requirements.txt)
+EOF
+  exit 1
+}
+
+set_colors() {
+  if [[ "$PLAIN" == "true" ]]; then
+    BOLD="" GREEN="" YELLOW="" RED="" BLUE="" CYAN="" DIM="" RESET="" BOLD_F=""
+  else
+    BOLD="\e[1m"
+    GREEN="\e[32m"
+    YELLOW="\e[33m"
+    RED="\e[31m"
+    BLUE="\e[34m"
+    CYAN="\e[36m"
+    DIM="\e[2m"
+    RESET="\e[0m"
+    BOLD_F="${BOLD}"
+  fi
+}
+
+get_global_node() {
+  command -v node &>/dev/null && node --version 2>/dev/null || echo ""
+}
+
+get_global_rust() {
+  command -v rustc &>/dev/null && rustc --version 2>/dev/null | awk '{print $2}' || echo ""
+}
+
+get_global_zig() {
+  command -v zig &>/dev/null && zig version 2>/dev/null || echo ""
+}
+
+get_global_go() {
+  command -v go &>/dev/null && go version 2>/dev/null | awk '{print $3}' | sed 's/go//' || echo ""
+}
+
+get_global_python() {
+  command -v python3 &>/dev/null && python3 --version 2>/dev/null | awk '{print $2}' || echo ""
+}
+
+declare -A PROJECT_VERSIONS
+
+scan_dir() {
+  local dir="$1"
+  
+  if [[ -f "$dir/package.json" ]]; then
+    local ver
+    ver=$(grep -E '"node"' "$dir/package.json" 2>/dev/null | sed 's/.*"node" *: *"\([^"]*\)".*/\1/' | head -1)
+    [[ -n "$ver" ]] && PROJECT_VERSIONS["$dir|node"]="$ver"
+  fi
+  
+  if [[ -f "$dir/.nvmrc" ]]; then
+    PROJECT_VERSIONS["$dir|node"]=$(cat "$dir/.nvmrc")
+  elif [[ -f "$dir/.node-version" ]]; then
+    PROJECT_VERSIONS["$dir|node"]=$(cat "$dir/.node-version")
+  fi
+  
+  if [[ -f "$dir/rust-toolchain.toml" ]]; then
+    local ver
+    ver=$(grep "channel" "$dir/rust-toolchain.toml" 2>/dev/null | sed 's/.*= *"\([^"]*\)".*/\1/')
+    [[ -n "$ver" ]] && PROJECT_VERSIONS["$dir|rust"]="$ver"
+  elif [[ -f "$dir/rust-toolchain" ]]; then
+    PROJECT_VERSIONS["$dir|rust"]=$(cat "$dir/rust-toolchain")
+  fi
+  
+  if [[ -f "$dir/Cargo.toml" ]]; then
+    local ver
+    ver=$(grep "^edition" "$dir/Cargo.toml" 2>/dev/null | head -1 | sed 's/.*= *"\([^"]*\)".*/\1/')
+    [[ -n "$ver" ]] && PROJECT_VERSIONS["$dir|rust-edition"]="$ver"
+  fi
+  
+  if [[ -f "$dir/build.zig.zon" ]]; then
+    local ver
+    ver=$(grep -E "^\\.zig" "$dir/build.zig.zon" 2>/dev/null | sed 's/.*version.*"\([^"]*\)".*/\1/' | head -1)
+    [[ -n "$ver" ]] && PROJECT_VERSIONS["$dir|zig"]="$ver"
+  elif [[ -f "$dir/.zig-version" ]]; then
+    PROJECT_VERSIONS["$dir|zig"]=$(cat "$dir/.zig-version")
+  fi
+  
+  if [[ -f "$dir/go.mod" ]]; then
+    local ver
+    ver=$(grep "^go " "$dir/go.mod" 2>/dev/null | awk '{print $2}')
+    [[ -n "$ver" ]] && PROJECT_VERSIONS["$dir|go"]="$ver"
+  fi
+  
+  if [[ -f "$dir/pyproject.toml" ]]; then
+    local ver
+    ver=$(grep "requires-python" "$dir/pyproject.toml" 2>/dev/null | sed 's/.*= *"\([^"]*\)".*/\1/')
+    [[ -n "$ver" ]] && PROJECT_VERSIONS["$dir|python"]="$ver"
+  fi
+  
+  if [[ -f "$dir/requirements.txt" ]]; then
+    local ver
+    ver=$(grep -E "python[0-9]" "$dir/requirements.txt" 2>/dev/null | head -1)
+    [[ -n "$ver" ]] && PROJECT_VERSIONS["$dir|python-constraint"]="$ver"
+  fi
+}
+
+main() {
+  local target_dir="."
+  
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help) usage ;;
+      -p|--plain) PLAIN=true ;;
+      -r|--recursive) RECURSIVE=true ;;
+      -*) ;;
+    esac
+  done
+  
+  for arg in "$@"; do
+    if [[ ! "$arg" == -* && -d "$arg" ]]; then
+      target_dir="$arg"
+      break
+    fi
+  done
+  
+  set_colors
+  
+  if [[ ! -d "$target_dir" ]]; then
+    echo -e "${RED}Directory not found: $target_dir${RESET}"
+    exit 1
+  fi
+  
+  echo
+  echo -e "${BOLD_F}${BLUE}󰠮 Dev Environment Drift Detector${RESET}"
+  echo
+  
+  local g_node g_rust g_zig g_go g_python
+  g_node=$(get_global_node)
+  g_rust=$(get_global_rust)
+  g_zig=$(get_global_zig)
+  g_go=$(get_global_go)
+  g_python=$(get_global_python)
+  
+  echo -e "${BOLD_F}${CYAN}Global Versions:${RESET}"
+  [[ -n "$g_node" ]] && echo -e "  ${GREEN}node${RESET}   : $g_node"
+  [[ -n "$g_rust" ]] && echo -e "  ${GREEN}rust${RESET}  : $g_rust"
+  [[ -n "$g_zig" ]] && echo -e "  ${GREEN}zig${RESET}   : $g_zig"
+  [[ -n "$g_go" ]] && echo -e "  ${GREEN}go${RESET}    : $g_go"
+  [[ -n "$g_python" ]] && echo -e "  ${GREEN}python${RESET}: $g_python"
+  echo
+  
+  if [[ "$RECURSIVE" == "true" ]]; then
+    echo -e "${BOLD_F}${CYAN}Scanning recursively...${RESET}"
+    while IFS= read -r file; do
+      dir=$(dirname "$file")
+      scan_dir "$dir"
+    done < <(find "$target_dir" -type f \( -name "package.json" -o -name "Cargo.toml" -o -name "rust-toolchain*" -o -name "go.mod" -o -name "build.zig.zon" -o -name "pyproject.toml" -o -name ".nvmrc" -o -name ".node-version" -o -name ".zig-version" -o -name "requirements.txt" \) 2>/dev/null)
+  else
+    scan_dir "$target_dir"
+  fi
+  
+  if [[ ${#PROJECT_VERSIONS[@]} -gt 0 ]]; then
+    echo -e "${BOLD_F}${YELLOW}Project Versions:${RESET}"
+    
+    declare -A version_counts
+    for key in "${!PROJECT_VERSIONS[@]}"; do
+      local tool="${key#*|}"
+      local ver="${PROJECT_VERSIONS[$key]}"
+      version_counts["$tool:$ver"]=$(( ${version_counts["$tool:$ver"]:-0} + 1 ))
+    done
+    
+    local prev_dir=""
+    for key in "${!PROJECT_VERSIONS[@]}"; do
+      local dir="${key%|*}"
+      local tool="${key#*|}"
+      local ver="${PROJECT_VERSIONS[$key]}"
+      
+      if [[ "$dir" != "$prev_dir" ]]; then
+        echo -e "  ${CYAN}$dir${RESET}"
+        prev_dir="$dir"
+      fi
+      echo -e "    $tool: $ver"
+      
+      local global_ver=""
+      case "$tool" in
+        node) global_ver="$g_node" ;;
+        rust|rust-edition) global_ver="$g_rust" ;;
+        zig) global_ver="$g_zig" ;;
+        go) global_ver="$g_go" ;;
+        python|python-constraint) global_ver="$g_python" ;;
+      esac
+      
+      if [[ -n "$global_ver" && "$ver" != "$global_ver" ]]; then
+        if [[ "$tool" == "rust-edition" ]]; then
+          echo -e "      ${YELLOW}⚠ global rust: $g_rust${RESET}"
+        else
+          echo -e "      ${YELLOW}⚠ global $tool: $global_ver${RESET}"
+        fi
+      fi
+    done
+    
+    echo
+    echo -e "${BOLD_F}${CYAN}Drift Summary:${RESET}"
+    local drift_found=0
+    for ver_key in "${!version_counts[@]}"; do
+      local tool="${ver_key%:*}"
+      local ver="${ver_key#*:}"
+      local count="${version_counts[$ver_key]}"
+      if [[ "$count" -gt 1 ]]; then
+        echo -e "  ${YELLOW}⚠${RESET} $tool $ver: $count projects"
+        drift_found=1
+      fi
+    done
+    [[ "$drift_found" -eq 0 ]] && echo -e "  ${GREEN}✓ No version conflicts${RESET}"
+  else
+    echo -e "${DIM}No project version files found${RESET}"
+  fi
+  
+  echo
+}
+
+main "$@"

@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PLAIN=false
+SLOW_THRESHOLD=10
+
+BOLD="" GREEN="" YELLOW="" RED="" BLUE="" CYAN="" DIM="" RESET="" BOLD_F=""
+
+usage() {
+  cat <<EOF
+Usage: zsh-profiler [options]
+
+Profile your Zsh startup time and plugins.
+
+Options:
+  -h, --help              Show this help
+  -p, --plain             Plain text output (no colors)
+  -s, --slow-threshold    Slow threshold in ms (default: 10)
+EOF
+  exit 1
+}
+
+set_colors() {
+  if [[ "$PLAIN" == "true" ]]; then
+    BOLD="" GREEN="" YELLOW="" RED="" BLUE="" CYAN="" DIM="" RESET="" BOLD_F=""
+  else
+    BOLD="\e[1m"
+    GREEN="\e[32m"
+    YELLOW="\e[33m"
+    RED="\e[31m"
+    BLUE="\e[34m"
+    CYAN="\e[36m"
+    DIM="\e[2m"
+    RESET="\e[0m"
+    BOLD_F="${BOLD}"
+  fi
+}
+
+profile_zsh() {
+  local zdotdir="${ZDOTDIR:-$HOME}"
+  
+  local start_time end_time total_ms
+  start_time=$(date +%s%N)
+  HOME="$zdotdir" zsh -l -i -c exit 2>/dev/null
+  end_time=$(date +%s%N)
+  total_ms=$(( (end_time - start_time) / 1000000 ))
+  
+  echo "$total_ms"
+}
+
+get_plugin_load_times() {
+  local zdotdir="${ZDOTDIR:-$HOME}"
+  local oh_my_zsh="$zdotdir/.oh-my-zsh"
+  local zinit_plugins="$zdotdir/.local/share/zinit/plugins"
+  
+  local plugins=()
+  
+  if [[ -f "$zdotdir/.zshrc" ]]; then
+    while IFS= read -r line; do
+      line="${line%%\#*}"
+      [[ -z "$line" ]] && continue
+      
+      if [[ "$line" =~ ^plugins=\( ]]; then
+        local content="${line#plugins=}"
+        content="${content//\"/}"
+        content="${content//\'/}"
+        content="${content//\(/}"
+        content="${content//\)/}"
+        for plugin in $content; do
+          [[ -n "$plugin" ]] && plugins+=("$plugin")
+        done
+      fi
+      
+      if [[ "$line" == zinit\ light\ * ]]; then
+        local plugin
+        plugin=$(echo "$line" | sed 's/.*zinit light //' | awk '{print $1}')
+        # Keep full name for zinit lookup, strip trailing stuff
+        plugin="${plugin%% *}"
+        [[ -n "$plugin" ]] && plugins+=("$plugin")
+      fi
+      
+      if [[ "$line" == zinit\ snippet\ * ]]; then
+        local plugin
+        plugin=$(echo "$line" | sed 's/.*zinit snippet //' | awk '{print $1}')
+        plugin="${plugin%% *}"
+        plugin="${plugin%.zsh}"
+        [[ -n "$plugin" ]] && plugins+=("$plugin")
+      fi
+    done < "$zdotdir/.zshrc"
+  fi
+  
+  for plugin in "${plugins[@]}"; do
+    local plugin_path=""
+    local zinit_name=""
+    local zsh_file=""
+    
+    if [[ -f "$oh_my_zsh/plugins/$plugin/$plugin.plugin.zsh" ]]; then
+      plugin_path="$oh_my_zsh/plugins/$plugin/$plugin.plugin.zsh"
+    elif [[ -f "$zdotdir/.local/share/zsh/plugins/$plugin/$plugin.plugin.zsh" ]]; then
+      plugin_path="$zdotdir/.local/share/zsh/plugins/$plugin/$plugin.plugin.zsh"
+    elif [[ -d "$zinit_plugins" ]]; then
+      zinit_name="${plugin//\//---}"
+      if [[ -d "$zinit_plugins/$zinit_name" ]]; then
+        zsh_file=$(ls "$zinit_plugins/$zinit_name"/*.zsh 2>/dev/null | head -1)
+        if [[ -n "$zsh_file" ]]; then
+          plugin_path="$zsh_file"
+        fi
+      fi
+    fi
+    
+    if [[ -n "$plugin_path" && -f "$plugin_path" ]]; then
+      local ms
+      ms=$(zsh -c "start=\$(date +%s%N); source '$plugin_path' 2>/dev/null; end=\$(date +%s%N); echo \$(( (end - start) / 1000000 ))" 2>/dev/null || echo "0")
+      echo "$plugin:$ms"
+    fi
+  done
+}
+
+find_duplicates() {
+  local zdotdir="${ZDOTDIR:-$HOME}"
+  declare -A sources
+  
+  if [[ -f "$zdotdir/.zshrc" ]]; then
+    while IFS= read -r line; do
+      line="${line%%\#*}"
+      [[ -z "$line" ]] && continue
+      
+      if [[ "$line" =~ ^source[[:space:]]+(.+) ]]; then
+        local src="${BASH_REMATCH[1]}"
+        src="${src//\"/}"
+        src="${src//\'/}"
+        
+        if [[ -n "${sources[$src]:-}" ]]; then
+          sources["$src"]=$(( sources["$src"] + 1 ))
+        else
+          sources["$src"]=1
+        fi
+      fi
+    done < "$zdotdir/.zshrc"
+  fi
+  
+  for src in "${!sources[@]}"; do
+    if [[ "${sources[$src]}" -gt 1 ]]; then
+      echo "$src: ${sources[$src]} times"
+    fi
+  done
+}
+
+count_plugins() {
+  local zdotdir="${ZDOTDIR:-$HOME}"
+  local count=0
+  
+  if [[ -f "$zdotdir/.zshrc" ]]; then
+    while IFS= read -r line; do
+      line="${line%%\#*}"
+      [[ -z "$line" ]] && continue
+      
+      if [[ "$line" =~ ^plugins=\( ]]; then
+        local content="${line#plugins=}"
+        content="${content//\"/}"
+        content="${content//\'/}"
+        content="${content//\(/}"
+        content="${content//\)/}"
+        for plugin in $content; do
+          [[ -n "$plugin" ]] && ((count++))
+        done
+      fi
+      
+      if [[ "$line" =~ ^zinit\ light\ (.+) ]]; then
+        ((count++))
+      fi
+      
+      if [[ "$line" =~ ^zinit\ snippet\ (.+) ]]; then
+        ((count++))
+      fi
+    done < "$zdotdir/.zshrc"
+  fi
+  
+  echo "$count"
+}
+
+main() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage ;;
+      -p|--plain) PLAIN=true ;;
+      -s|--slow-threshold)
+        shift
+        SLOW_THRESHOLD="${1:-10}"
+        ;;
+      *) ;;
+    esac
+    shift
+  done
+  
+  set_colors
+  
+  echo
+  echo -e "${BOLD_F}${BLUE}󰨰 Zsh Startup Profiler${RESET}"
+  echo
+  
+  local total_ms
+  total_ms=$(profile_zsh)
+  
+  echo -e "  ${CYAN}zsh load${RESET}: ${GREEN}${total_ms}ms${RESET}"
+  echo
+  
+  declare -A plugin_times=()
+  local plugin_output
+  plugin_output=$(get_plugin_load_times 2>/dev/null || true)
+  
+  while IFS=: read -r plugin time; do
+    [[ -n "$plugin" && -n "$time" ]] && plugin_times["$plugin"]="$time"
+  done <<< "$plugin_output"
+  
+  if [[ ${#plugin_times[@]} -gt 0 ]]; then
+    declare -a sorted=()
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && sorted+=("$line")
+    done < <(for k in "${!plugin_times[@]}"; do echo "${plugin_times[$k]} $k"; done | sort -rn)
+    
+    echo -e "${BOLD_F}${YELLOW}Slowest:${RESET}"
+    local found_slow=0
+    for line in "${sorted[@]}"; do
+      local time name
+      time=$(echo "$line" | cut -d' ' -f1)
+      name=$(echo "$line" | cut -d' ' -f2-)
+      
+      if [[ "$time" -ge "$SLOW_THRESHOLD" ]]; then
+        found_slow=1
+        local bar_len=$(( time / 3 ))
+        [[ "$bar_len" -gt 25 ]] && bar_len=25
+        local bar
+        bar=$(printf '█%.0s' $(seq 1 "$bar_len"))
+        
+        if [[ "$time" -gt 50 ]]; then
+          echo -e "  ${RED}$name${RESET}     ${time}ms ${RED}$bar${RESET}"
+        elif [[ "$time" -gt 20 ]]; then
+          echo -e "  ${YELLOW}$name${RESET}     ${time}ms ${YELLOW}$bar${RESET}"
+        else
+          echo -e "  ${GREEN}$name${RESET}     ${time}ms ${GREEN}$bar${RESET}"
+        fi
+      fi
+    done
+    
+    if [[ "$found_slow" -eq 0 ]]; then
+      echo -e "  ${DIM}No slow plugins found${RESET}"
+    fi
+    echo
+  fi
+  
+  local -a duplicates=()
+  while IFS= read -r dup; do
+    [[ -n "$dup" ]] && duplicates+=("$dup")
+  done < <(find_duplicates 2>/dev/null || true)
+  
+  if [[ ${#duplicates[@]} -gt 0 ]]; then
+    echo -e "${BOLD_F}${RED}Duplicates:${RESET}"
+    for dup in "${duplicates[@]}"; do
+      echo -e "  ${RED}!${RESET} $dup"
+    done
+    echo
+  fi
+  
+  local zdotdir="${ZDOTDIR:-$HOME}"
+  local file_count=0
+  local file
+  for file in "$zdotdir/.zshenv" "$zdotdir/.zprofile" "$zdotdir/.zshrc" "$zdotdir/.zlogin"; do
+    if [[ -f "$file" ]]; then
+      ((file_count++)) || true
+    fi
+  done
+  
+  local plugin_count
+  plugin_count=$(count_plugins)
+  
+  echo -e "${BOLD_F}${CYAN}Files sourced:${RESET} $file_count"
+  echo -e "${BOLD_F}${CYAN}Plugins:${RESET} $plugin_count"
+  echo
+}
+
+main "$@"
